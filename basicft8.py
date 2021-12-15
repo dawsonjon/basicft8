@@ -132,6 +132,8 @@ import time
 import re
 import threading
 
+from matplotlib import pyplot as plt
+
 ## FT8 modulation and protocol definitions.
 ## 1920-point FFT at 12000 samples/second
 ##   yields 6.25 Hz spacing, 0.16 seconds/symbol
@@ -164,6 +166,9 @@ class FT8:
         # self.block is 1920, the number of samples in one FT8 symbol.
 
         nblocks = len(samples) // self.block ## number of symbol times in samples[]
+        nblocks -= 1
+
+        print(self.block)
 
         # Perform one FFT for each symbol-time's worth of samples.
         # Each FFT returns an array with nbins elements. The matrix m
@@ -175,13 +180,18 @@ class FT8:
 
         ## one FFT per symbol time.
         ## each FFT bin corresponds to one FSK tone.
+        offsets = 4
+
         nbins = (self.block // 2) + 1        ## number of bins in FFT output
-        m = numpy.zeros((nblocks, nbins))
-        for i in range(0, nblocks):
-            block = samples[i*self.block:(i+1)*self.block]
-            bins = numpy.fft.rfft(block)
-            bins = abs(bins)
-            m[i] = bins
+        m = numpy.zeros((offsets, nblocks, nbins))
+        for offset in range(offsets):
+            offset_in_samples = self.block*offset//offsets
+            for i in range(0, nblocks):
+                block = samples[i*self.block+offset_in_samples:(i+1)*self.block+offset_in_samples]
+                bins = numpy.fft.rfft(block)
+                bins = abs(bins)
+                m[offset, i] = bins
+
 
         # Much of this code deals with arrays of numbers. Thus block
         # above holds the 1920 samples of a single symbol time, bins
@@ -224,17 +234,25 @@ class FT8:
         for bi in range(0, nbins-8):
             ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
             for si in range(0, nblocks - 79):
-                signal = m[si:si+79,bi:bi+8]
-                strength = 0.0
-                strength += numpy.sum(signal[0:7,0:8] * costas_matrix)
-                strength += numpy.sum(signal[36:43,0:8] * costas_matrix)
-                strength += numpy.sum(signal[72:79,0:8] * costas_matrix)
-                candidates.append( [ bi, si, strength ] )
+                strengths = []
+                for offset in range(offsets):
+                    signal = m[offset, si:si+79,bi:bi+8]
+                    strength = 0.0
+                    strength += numpy.sum(signal[0:7,0:8] * costas_matrix)
+                    strength += numpy.sum(signal[36:43,0:8] * costas_matrix)
+                    strength += numpy.sum(signal[72:79,0:8] * costas_matrix)
+                    strengths.append(strength)
+                
+                best_strength = max(strengths)
+                best_offset = strengths.index(best_strength)
+
+                candidates.append( [ best_offset, bi, si, strength ] )
+
 
         # Sort the candidate signals, strongest first.
 
         ## sort the candidates, strongest Costas sync first.
-        candidates = sorted(candidates, key = lambda e : -e[2])
+        candidates = sorted(candidates, key = lambda e : -e[3])
 
         # Now we'll look at the candidate start positions, strongest
         # first, and see if the LDPC decoder can extract a signal from
@@ -262,19 +280,18 @@ class FT8:
         # below). This loop quits after 10 seconds.
 
         ## look at candidates, best first.
-        for cc in candidates:
-            if time.time() - t0 >= 10:
+        for offset, bi, si, _ in candidates:
+            if time.time() - t0 >= 20:
                 ## quit after 10 seconds.
                 break
 
-            bi = cc[0]
-            si = cc[1]
             ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
-            signal = m[si:si+79,bi:bi+8]
+            signal = m[offset, si:si+79,bi:bi+8]
 
             msg = self.process1(signal)
 
             if msg != None:
+                print(offset, bi, si)
                 bin_hz = self.rate / float(self.block)
                 hz = bi * bin_hz
                 print("%6.1f %s" % (hz, msg))

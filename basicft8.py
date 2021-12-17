@@ -749,7 +749,7 @@ class FT8:
 # The codeword bits mentioned in each row must exclusive-or to zero.
 # There are 87 rows.
 # Nm is a copy of wsjt-x's bpdecode174.f90.
-Nm = [
+nmx = numpy.array([
     [ 1,   30,  60,  89,   118,  147,  0 ],
     [ 2,   31,  61,  90,   119,  147,  0 ],
     [ 3,   32,  62,  91,   120,  148,  0 ],
@@ -837,7 +837,7 @@ Nm = [
     [ 28,  49,  59,  94,   137,  0,    0 ],
     [ 7,   55,  83,  101,  131,  168,  0 ],
     [ 24,  50,  78,  106,  143,  149,  0 ],
-]
+], dtype=numpy.int32)
 
 # Mn is the dual of Nm.
 # Each row corresponds to a codeword bit.
@@ -845,7 +845,7 @@ Nm = [
 # checks (rows in Nm) refer to the codeword bit.
 # 1-origin.
 # Mn is a copy of wsjt-x's bpdecode174.f90.
-Mn = [
+mnx = numpy.array([
   [ 1, 25, 69 ],
   [ 2, 5, 73 ],
   [ 3, 32, 68 ],
@@ -1020,7 +1020,7 @@ Mn = [
   [ 40, 52, 78 ],
   [ 54, 61, 71 ],
   [ 46, 58, 69 ],
-]
+], dtype=numpy.int32)
 
 # This is an indirection table that moves a
 # codeword's 87 systematic (message) bits to the end.
@@ -1050,8 +1050,6 @@ def ldpc_decode(codeword):
     ## 174 codeword bits
     ## 87 parity checks
 
-    mnx = numpy.array(Mn, dtype=numpy.int32)
-    nmx = numpy.array(Nm, dtype=numpy.int32)
 
     ## Mji
     ## each codeword bit i tells each parity check j
@@ -1082,40 +1080,39 @@ def ldpc_decode(codeword):
         ##            if ii != i:
         ##                a *= math.tanh(m[j][ii-1] / 2.0)
         ##        e[j][i-1] = math.log((1 + a) / (1 - a))
-
         
         x2 = numpy.zeros((7, 87))
         for ii in range(0, 7):
             x1 = numpy.tanh(m[numpy.arange(0, 87), nmx[:,ii]-1] / 2.0)
-            x2[ii, :] = numpy.where(numpy.greater(nmx[:,ii], 0.0), x1, 1.0)
+            x1[nmx[:, ii] <= 0] = 1.0
+            x2[ii, :] = x1
 
         for i in range(0, 7):
             a = numpy.ones(87)
             for ii in range(0, 7):
                 if ii != i:
-                    #No need to compute x2 in each iteration
+                    #No need to compute x2 in each iteration of ii
                     #x1 = numpy.tanh(m[numpy.arange(0, 87), nmx[:,ii]-1] / 2.0)
                     #x2 = numpy.where(numpy.greater(nmx[:,ii], 0.0), x1, 1.0)
                     a = a * x2[ii]
+
             ## avoid divide by zero, i.e. a[i]==1.0
             ## XXX why is a[i] sometimes 1.0?
-            b = numpy.where(numpy.less(a, 0.99999), a, 0.99)
-            c = numpy.log((b + 1.0) / (1.0 - b))
+            #b = numpy.where(numpy.less(a, 0.99999), a, 0.99)
+            a[a>0.99999] = 0.99
+            c = numpy.log((a + 1.0) / (1.0 - a))
             ## have assign be no-op when nmx[a,b] == 0
             d = numpy.where(numpy.equal(nmx[:,i], 0),
-                            e[range(0,87), nmx[:,i]-1],
+                            e[numpy.arange(0,87), nmx[:,i]-1],
                             c)
-            e[range(0,87), nmx[:,i]-1] = d
-
-        #print("1", time.time()-t0)
-        #t0 = time.time()
+            e[numpy.arange(0,87), nmx[:,i]-1] = d
 
         ## decide if we are done -- compute the corrected codeword,
         ## see if the parity check succeeds.
         ## sum the three log likelihoods contributing to each codeword bit.
-        e0 = e[mnx[:,0]-1, range(0,174)]
-        e1 = e[mnx[:,1]-1, range(0,174)]
-        e2 = e[mnx[:,2]-1, range(0,174)]
+        e0 = e[mnx[:,0]-1, numpy.arange(0,174)]
+        e1 = e[mnx[:,1]-1, numpy.arange(0,174)]
+        e2 = e[mnx[:,2]-1, numpy.arange(0,174)]
         ll = codeword + e0 + e1 + e2
         ## log likelihood > 0 => bit=0.
         cw = numpy.select( [ ll < 0 ], [ numpy.ones(174, dtype=numpy.int32) ])
@@ -1132,15 +1129,12 @@ def ldpc_decode(codeword):
             ## for each column in Mn.
             ll = codeword
             if j != 0:
-                e0 = e[mnx[:,0]-1, range(0,174)]
                 ll = ll + e0
             if j != 1:
-                e1 = e[mnx[:,1]-1, range(0,174)]
                 ll = ll + e1
             if j != 2:
-                e2 = e[mnx[:,2]-1, range(0,174)]
                 ll = ll + e2
-            m[mnx[:,j]-1, range(0,174)] = ll
+            m[mnx[:,j]-1, numpy.arange(0,174)] = ll
 
     ## could not decode.
     return numpy.array([])
@@ -1148,7 +1142,7 @@ def ldpc_decode(codeword):
 # A helper function to decide if
 # a 174-bit codeword passes the LDPC parity checks.
 def ldpc_check(codeword):
-    for e in Nm:
+    for e in nmx:
         x = 0
         for i in e:
             if i != 0:

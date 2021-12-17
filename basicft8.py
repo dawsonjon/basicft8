@@ -186,21 +186,27 @@ class FT8:
         ## one FFT per symbol time.
         ## each FFT bin corresponds to one FSK tone.
         nbins = (self.block // 2) + 1        ## number of bins in FFT output
-        npositions = 8
+
+        # performance depends on how well the frequency bins and start time align
+        # try many starting points and look for the best strength correlation
+        npositions = 4                       ## Number of starting positions per block
+        nfinebins = 4
+
         nstarts = nblocks * npositions
         start_increment = len(samples) // nstarts
 
-        m = numpy.zeros((nstarts-npositions, nbins))
+        m = numpy.zeros((nstarts-npositions, (self.block*nfinebins)//2+1))
         for start_position in range(nstarts-npositions):
             block_start = start_position * start_increment
             block_end = block_start + self.block
             block = samples[block_start:block_end]
+            #zero pad to give more than one FFTbin per tone
+            padding = self.block*(nfinebins-1)
+            block = numpy.concatenate((block, numpy.zeros(padding)))
             bins = numpy.fft.rfft(block)
             bins = abs(bins)
             m[start_position] = bins
 
-        #plt.imshow(m)
-        #plt.show()
 
 
         # Much of this code deals with arrays of numbers. Thus block
@@ -225,13 +231,14 @@ class FT8:
         ## prepare a template of the Costas sync array
         ## we expect to receive at start, middle, and
         ## end of a transmission.
-        costas_matrix = numpy.ones((7, 8)) * (-1 / 7.0)
+        #costas_matrix = numpy.ones((7, 8)) * (-1 / 7.0)
+        costas_matrix = numpy.zeros((7, 8))
         costas_symbols = [ 2, 5, 6, 0, 4, 1, 3 ]
         for i in range(0, len(costas_symbols)):
             costas_matrix[i][costas_symbols[i]] = 1
 
         ##scale costas matrix by number of start positions
-        costas_matrix = numpy.kron(costas_matrix, numpy.ones((npositions, 1)))
+        costas_matrix = numpy.kron(costas_matrix, numpy.ones((npositions, nfinebins)))
 
         # Now examine every symbol-time and FFT frequency bin at which
         # a signal could start (there are a few thousand of them). The
@@ -253,12 +260,41 @@ class FT8:
         strengths = start+middle+end
 
         #extract candidate start points from best to worst
+        nregions = nbins//8
+        frequency_bins = strengths.shape[1] 
+        region_size = frequency_bins/nregions
+
         sorted_indices = numpy.argsort(strengths, axis=None)[::-1]
         unraveled_indices = numpy.unravel_index(sorted_indices, strengths.shape)
         start_times, start_frequencies = unraveled_indices
         sorted_strengths = strengths[unraveled_indices]
-        candidates = list(zip(start_times-(6*npositions)-npositions//2, start_frequencies-7, sorted_strengths))
-        #candidates = list(zip(start_times-(5*npositions), start_frequencies-7, sorted_strengths))
+        candidates = list(zip(start_times-(6*npositions)-npositions//2, start_frequencies-(7*nfinebins), sorted_strengths, start_frequencies//region_size, range(len(start_times))))
+
+        #we can end up with lots of candidates relating to the same signal, so it would be inefficient to search
+        #purely on the basis of power. 
+        deinterleaved_candidates = {}
+        for i in range(nregions):
+            deinterleaved_candidates[i] = []
+        for candidate in candidates[:len(candidates)//2]:
+            t, f, s, region, _ = candidate
+            if f < 0 or t < 0: 
+                continue
+            deinterleaved_candidates[region].append(candidate)
+
+        #for region in range(nregions):
+            #print(region,  len(deinterleaved_candidates[region]))
+
+        iterators = [iter(i) for i in deinterleaved_candidates.values()]
+
+        candidates = []
+        for i in range(10000):
+            for i in iterators:
+                try:
+                    x = next(i)
+                    candidates.append(x)
+                except StopIteration:
+                    pass
+        
 
         #plt.figure()
         #plt.imshow(strengths)
@@ -293,45 +329,47 @@ class FT8:
         # below). This loop quits after 10 seconds.
 
         ## look at candidates, best first.
-        seen = []
-        found_at = {}
+        decodes = []
+        frequencies = {}
+        times = {}
+        regions = {}
         t0 = time.time()
-        for start_time, start_frequency, strength in candidates:
+        rank = 0
+        for start_time, start_frequency, strength, region, global_rank in candidates:
+            rank += 1
 
-            #if time.time() - t0 >= 10:
-                ## quit after 10 seconds.
-                #break
+
             if start_time < 0 or start_frequency < 0:
                 continue
 
-            #if abs(start_frequency - 198) < 1:
-            #    print(start_time, start_frequency, strength)
+            #if region in regions.values():
+                #continue
 
             ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
             end_time = start_time+(79*npositions)
-            end_frequency = start_frequency+8
-            signal = m[start_time:end_time:npositions,start_frequency:end_frequency]
-            #plt.figure()
-            #plt.imshow(signal)
-            #plt.show()
+            end_frequency = start_frequency+(8*nfinebins)
+            signal = m[start_time:end_time:npositions,start_frequency:end_frequency:nfinebins]
 
             msg = self.process1(signal)
 
-            if msg != None and msg not in seen:
-                bin_hz = self.rate / float(self.block)
+            if msg != None and msg not in decodes:
+                bin_hz = self.rate / (float(self.block)*nfinebins)
                 hz = start_frequency * bin_hz
-                seen.append(msg)
-                found_at[msg] = (start_time, start_frequency)
-                print("%6.1f %s" % (hz, msg))
+                decodes.append(msg)
+                frequencies[msg] = start_frequency
+                times[msg] = start_time
+                regions[msg] = region
+                print("%6.1f %s" % (hz, msg), region, rank, global_rank)
 
-            if len(seen) == 7:
+            if len(decodes) == 8:
                     break
 
         print(time.time()-t0)
         plt.figure()
         plt.imshow(m)
-        for msg in seen:
-            t, f = found_at[msg]
+        for msg in decodes:
+            t = times[msg]
+            f = frequencies[msg]
             plt.plot(f,t, 'x')
             plt.text(f,t, msg, ha="center", va="top", color="w", rotation=-90)
         plt.show()

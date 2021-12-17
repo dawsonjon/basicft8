@@ -125,6 +125,7 @@
 # sound cards.
 
 import numpy
+import scipy.signal
 import pyaudio
 import wave
 import sys
@@ -159,6 +160,13 @@ class FT8:
     # time.time() records the starting wall-clock time in seconds.
 
     def process(self, samples):
+
+        fs = 12000
+        f_offset = 7*6.25/8
+        t = numpy.arange(len(samples))
+        x = numpy.exp(-1.0j*2*f_offset*numpy.pi*t/fs)
+
+
         ## set up to quit after 10 seconds.
         t0 = time.time()
 
@@ -166,9 +174,6 @@ class FT8:
         # self.block is 1920, the number of samples in one FT8 symbol.
 
         nblocks = len(samples) // self.block ## number of symbol times in samples[]
-        nblocks -= 1
-
-        print(self.block)
 
         # Perform one FFT for each symbol-time's worth of samples.
         # Each FFT returns an array with nbins elements. The matrix m
@@ -180,17 +185,22 @@ class FT8:
 
         ## one FFT per symbol time.
         ## each FFT bin corresponds to one FSK tone.
-        offsets = 4
-
         nbins = (self.block // 2) + 1        ## number of bins in FFT output
-        m = numpy.zeros((offsets, nblocks, nbins))
-        for offset in range(offsets):
-            offset_in_samples = self.block*offset//offsets
-            for i in range(0, nblocks):
-                block = samples[i*self.block+offset_in_samples:(i+1)*self.block+offset_in_samples]
-                bins = numpy.fft.rfft(block)
-                bins = abs(bins)
-                m[offset, i] = bins
+        npositions = 8
+        nstarts = nblocks * npositions
+        start_increment = len(samples) // nstarts
+
+        m = numpy.zeros((nstarts-npositions, nbins))
+        for start_position in range(nstarts-npositions):
+            block_start = start_position * start_increment
+            block_end = block_start + self.block
+            block = samples[block_start:block_end]
+            bins = numpy.fft.rfft(block)
+            bins = abs(bins)
+            m[start_position] = bins
+
+        #plt.imshow(m)
+        #plt.show()
 
 
         # Much of this code deals with arrays of numbers. Thus block
@@ -220,6 +230,9 @@ class FT8:
         for i in range(0, len(costas_symbols)):
             costas_matrix[i][costas_symbols[i]] = 1
 
+        ##scale costas matrix by number of start positions
+        costas_matrix = numpy.kron(costas_matrix, numpy.ones((npositions, 1)))
+
         # Now examine every symbol-time and FFT frequency bin at which
         # a signal could start (there are a few thousand of them). The
         # signal variable holds the 79x8 matrix for one signal. Sum
@@ -228,31 +241,31 @@ class FT8:
         # candidates will end up holding the likelihood of there being
         # an FT8 signal for every possible starting position.
 
-        ## first pass: look for Costas sync arrays.
-        candidates = [ ]
-        ## for each start time
-        for bi in range(0, nbins-8):
-            ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
-            for si in range(0, nblocks - 79):
-                strengths = []
-                for offset in range(offsets):
-                    signal = m[offset, si:si+79,bi:bi+8]
-                    strength = 0.0
-                    strength += numpy.sum(signal[0:7,0:8] * costas_matrix)
-                    strength += numpy.sum(signal[36:43,0:8] * costas_matrix)
-                    strength += numpy.sum(signal[72:79,0:8] * costas_matrix)
-                    strengths.append(strength)
-                
-                best_strength = max(strengths)
-                best_offset = strengths.index(best_strength)
+        # A 2d correlation with the costas array shows where the best matches are
+        strengths = scipy.signal.correlate2d(m, costas_matrix)
 
-                candidates.append( [ best_offset, bi, si, strength ] )
+        # Overlay the start middle and end of the signal, a real signal will match in all 3
+        # The signal can only start so late before we won't see the whole thing, limit to this range
+        start_range = strengths.shape[0] - (72*npositions) 
+        start = strengths[0:start_range, :]
+        middle = strengths[(36*npositions):(36*npositions)+start_range, :]
+        end = strengths[(72*npositions):(72*npositions)+start_range, :]
+        strengths = start+middle+end
 
+        #extract candidate start points from best to worst
+        sorted_indices = numpy.argsort(strengths, axis=None)[::-1]
+        unraveled_indices = numpy.unravel_index(sorted_indices, strengths.shape)
+        start_times, start_frequencies = unraveled_indices
+        sorted_strengths = strengths[unraveled_indices]
+        candidates = list(zip(start_times-(6*npositions)-npositions//2, start_frequencies-7, sorted_strengths))
+        #candidates = list(zip(start_times-(5*npositions), start_frequencies-7, sorted_strengths))
 
-        # Sort the candidate signals, strongest first.
-
-        ## sort the candidates, strongest Costas sync first.
-        candidates = sorted(candidates, key = lambda e : -e[3])
+        #plt.figure()
+        #plt.imshow(strengths)
+        #for t, f, _ in candidates[:100]:
+            #plt.text(f,t, 'x', ha="center", va="center", color="w")
+        #plt.show()
+#
 
         # Now we'll look at the candidate start positions, strongest
         # first, and see if the LDPC decoder can extract a signal from
@@ -280,21 +293,49 @@ class FT8:
         # below). This loop quits after 10 seconds.
 
         ## look at candidates, best first.
-        for offset, bi, si, _ in candidates:
-            if time.time() - t0 >= 20:
+        seen = []
+        found_at = {}
+        t0 = time.time()
+        for start_time, start_frequency, strength in candidates:
+
+            #if time.time() - t0 >= 10:
                 ## quit after 10 seconds.
-                break
+                #break
+            if start_time < 0 or start_frequency < 0:
+                continue
+
+            #if abs(start_frequency - 198) < 1:
+            #    print(start_time, start_frequency, strength)
 
             ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
-            signal = m[offset, si:si+79,bi:bi+8]
+            end_time = start_time+(79*npositions)
+            end_frequency = start_frequency+8
+            signal = m[start_time:end_time:npositions,start_frequency:end_frequency]
+            #plt.figure()
+            #plt.imshow(signal)
+            #plt.show()
 
             msg = self.process1(signal)
 
-            if msg != None:
-                print(offset, bi, si)
+            if msg != None and msg not in seen:
                 bin_hz = self.rate / float(self.block)
-                hz = bi * bin_hz
+                hz = start_frequency * bin_hz
+                seen.append(msg)
+                found_at[msg] = (start_time, start_frequency)
                 print("%6.1f %s" % (hz, msg))
+
+            if len(seen) == 7:
+                    break
+
+        print(time.time()-t0)
+        plt.figure()
+        plt.imshow(m)
+        for msg in seen:
+            t, f = found_at[msg]
+            plt.plot(f,t, 'x')
+            plt.text(f,t, msg, ha="center", va="top", color="w", rotation=-90)
+        plt.show()
+
 
 
     # fsk_bits() is a helper function that turns a 58x8 array of tone

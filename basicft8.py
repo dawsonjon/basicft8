@@ -355,14 +355,14 @@ class FT8:
                     break
 
         print(time.time()-t0)
-        plt.figure()
-        plt.imshow(m)
-        for msg in decodes:
-            t = times[msg]
-            f = frequencies[msg]
-            plt.plot(f,t, 'x')
-            plt.text(f,t, msg, ha="center", va="top", color="w", rotation=-90)
-        plt.show()
+        #plt.figure()
+        #plt.imshow(m)
+        #for msg in decodes:
+            #t = times[msg]
+            #f = frequencies[msg]
+            #plt.plot(f,t, 'x')
+            #plt.text(f,t, msg, ha="center", va="top", color="w", rotation=-90)
+        #plt.show()
 
 
 
@@ -380,11 +380,11 @@ class FT8:
     ## but the probability is faked.
     def fsk_bits(self, m58):
         ## strongest tone for each symbol time.
-        s58 = [ numpy.argmax(x) for x in m58 ]
+        s58 = numpy.argmax(m58, 1)
 
         ## turn each 3-bit symbol into three bits.
         ## most-significant bit first.
-        bits3 = [ [ (x>>2)&1, (x>>1)&1, x&1 ] for x in s58 ]
+        bits3 = [(x>>2&1, x>>1&1, x&1) for x in s58]
         a174 = numpy.concatenate(bits3)
 
         return a174
@@ -1046,6 +1046,7 @@ colorder = [
 # from Sarah Johnson's Iterative Error Correction book.
 ## codeword[i] = log ( P(x=0) / P(x=1) )
 def ldpc_decode(codeword):
+
     ## 174 codeword bits
     ## 87 parity checks
 
@@ -1057,13 +1058,11 @@ def ldpc_decode(codeword):
     ## what the bit's log-likelihood of being 0 is
     ## based on information *other* than from that
     ## parity check.
-    m = numpy.zeros((87, 174))
-
-    for i in range(0, 174):
-        for j in range(0, 87):
-            m[j][i] = codeword[i]
+    m = numpy.tile(codeword, (87, 1))
 
     for iter in range(0, 30):
+        #print("0", time.time()-t0)
+        #t0 = time.time()
         ## Eji
         ## each check j tells each codeword bit i the
         ## log likelihood of the bit being zero based
@@ -1083,13 +1082,21 @@ def ldpc_decode(codeword):
         ##            if ii != i:
         ##                a *= math.tanh(m[j][ii-1] / 2.0)
         ##        e[j][i-1] = math.log((1 + a) / (1 - a))
+
+        
+        x2 = numpy.zeros((7, 87))
+        for ii in range(0, 7):
+            x1 = numpy.tanh(m[numpy.arange(0, 87), nmx[:,ii]-1] / 2.0)
+            x2[ii, :] = numpy.where(numpy.greater(nmx[:,ii], 0.0), x1, 1.0)
+
         for i in range(0, 7):
             a = numpy.ones(87)
             for ii in range(0, 7):
                 if ii != i:
-                    x1 = numpy.tanh(m[range(0, 87), nmx[:,ii]-1] / 2.0)
-                    x2 = numpy.where(numpy.greater(nmx[:,ii], 0.0), x1, 1.0)
-                    a = a * x2
+                    #No need to compute x2 in each iteration
+                    #x1 = numpy.tanh(m[numpy.arange(0, 87), nmx[:,ii]-1] / 2.0)
+                    #x2 = numpy.where(numpy.greater(nmx[:,ii], 0.0), x1, 1.0)
+                    a = a * x2[ii]
             ## avoid divide by zero, i.e. a[i]==1.0
             ## XXX why is a[i] sometimes 1.0?
             b = numpy.where(numpy.less(a, 0.99999), a, 0.99)
@@ -1099,6 +1106,9 @@ def ldpc_decode(codeword):
                             e[range(0,87), nmx[:,i]-1],
                             c)
             e[range(0,87), nmx[:,i]-1] = d
+
+        #print("1", time.time()-t0)
+        #t0 = time.time()
 
         ## decide if we are done -- compute the corrected codeword,
         ## see if the parity check succeeds.

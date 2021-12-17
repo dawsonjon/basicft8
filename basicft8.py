@@ -161,12 +161,6 @@ class FT8:
 
     def process(self, samples):
 
-        fs = 12000
-        f_offset = 7*6.25/8
-        t = numpy.arange(len(samples))
-        x = numpy.exp(-1.0j*2*f_offset*numpy.pi*t/fs)
-
-
         ## set up to quit after 10 seconds.
         t0 = time.time()
 
@@ -189,8 +183,8 @@ class FT8:
 
         # performance depends on how well the frequency bins and start time align
         # try many starting points and look for the best strength correlation
-        npositions = 4                       ## Number of starting positions per block
-        nfinebins = 4
+        npositions = 2                       ## Number of starting positions per block
+        nfinebins = 2
 
         nstarts = nblocks * npositions
         start_increment = len(samples) // nstarts
@@ -206,7 +200,6 @@ class FT8:
             bins = numpy.fft.rfft(block)
             bins = abs(bins)
             m[start_position] = bins
-
 
 
         # Much of this code deals with arrays of numbers. Thus block
@@ -268,7 +261,8 @@ class FT8:
         unraveled_indices = numpy.unravel_index(sorted_indices, strengths.shape)
         start_times, start_frequencies = unraveled_indices
         sorted_strengths = strengths[unraveled_indices]
-        candidates = list(zip(start_times-(6*npositions)-npositions//2, start_frequencies-(7*nfinebins), sorted_strengths, start_frequencies//region_size, range(len(start_times))))
+
+        candidates = list(zip(start_times-costas_matrix.shape[0]+1, start_frequencies-costas_matrix.shape[1]+1, sorted_strengths, start_frequencies//region_size, range(len(start_times))))
 
         #we can end up with lots of candidates relating to the same signal, so it would be inefficient to search
         #purely on the basis of power. 
@@ -280,9 +274,6 @@ class FT8:
             if f < 0 or t < 0: 
                 continue
             deinterleaved_candidates[region].append(candidate)
-
-        #for region in range(nregions):
-            #print(region,  len(deinterleaved_candidates[region]))
 
         iterators = [iter(i) for i in deinterleaved_candidates.values()]
 
@@ -337,7 +328,6 @@ class FT8:
         rank = 0
         for start_time, start_frequency, strength, region, global_rank in candidates:
             rank += 1
-
 
             if start_time < 0 or start_frequency < 0:
                 continue

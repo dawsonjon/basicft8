@@ -164,11 +164,6 @@ class FT8:
         ## set up to quit after 10 seconds.
         t0 = time.time()
 
-        # How many symbols does samples hold? // is Python's integer division.
-        # self.block is 1920, the number of samples in one FT8 symbol.
-
-        nblocks = len(samples) // self.block ## number of symbol times in samples[]
-
         # Perform one FFT for each symbol-time's worth of samples.
         # Each FFT returns an array with nbins elements. The matrix m
         # will hold the results; m[i][j] holds the strength of
@@ -177,20 +172,24 @@ class FT8:
         # phase as well as amplitude; the abs() essentially throws away
         # the phase.
 
-        ## one FFT per symbol time.
+        # How many symbols does samples hold? // is Python's integer division.
+        # self.block is 1920, the number of samples in one FT8 symbol.
+        nblocks = len(samples) // self.block ## number of symbol times in samples[]
+
         ## each FFT bin corresponds to one FSK tone.
         nbins = (self.block // 2) + 1        ## number of bins in FFT output
 
         # performance depends on how well the frequency bins and start time align
-        # try many starting points and look for the best strength correlation
-        npositions = 2                       ## Number of starting positions per block
-        nfinebins = 2
+        # try starting at different positions in each blocks, and different
+        # frequencies within each tone. 
+        nfineblocks = 2                       ## Number of starting positions per block
+        nfinebins = 2                         ## Number of fine FFT bins per tone
 
-        nstarts = nblocks * npositions
+        nstarts = nblocks * nfineblocks
         start_increment = len(samples) // nstarts
 
-        m = numpy.zeros((nstarts-npositions, (self.block*nfinebins)//2+1))
-        for start_position in range(nstarts-npositions):
+        m = numpy.zeros((nstarts-nfineblocks, (self.block*nfinebins)//2+1))
+        for start_position in range(nstarts-nfineblocks):
             block_start = start_position * start_increment
             block_end = block_start + self.block
             block = samples[block_start:block_end]
@@ -230,8 +229,8 @@ class FT8:
         for i in range(0, len(costas_symbols)):
             costas_matrix[i][costas_symbols[i]] = 1
 
-        ##scale costas matrix by number of start positions
-        costas_matrix = numpy.kron(costas_matrix, numpy.ones((npositions, nfinebins)))
+        ##scale costas matrix by number of fine blocks and fine bins
+        costas_matrix = numpy.kron(costas_matrix, numpy.ones((nfineblocks, nfinebins)))
 
         # Now examine every symbol-time and FFT frequency bin at which
         # a signal could start (there are a few thousand of them). The
@@ -246,10 +245,10 @@ class FT8:
 
         # Overlay the start middle and end of the signal, a real signal will match in all 3
         # The signal can only start so late before we won't see the whole thing, limit to this range
-        start_range = strengths.shape[0] - (72*npositions) 
+        start_range = strengths.shape[0] - (72*nfineblocks) 
         start = strengths[0:start_range, :]
-        middle = strengths[(36*npositions):(36*npositions)+start_range, :]
-        end = strengths[(72*npositions):(72*npositions)+start_range, :]
+        middle = strengths[(36*nfineblocks):(36*nfineblocks)+start_range, :]
+        end = strengths[(72*nfineblocks):(72*nfineblocks)+start_range, :]
         strengths = start+middle+end
 
         #extract candidate start points from best to worst
@@ -287,13 +286,6 @@ class FT8:
                     pass
         
 
-        #plt.figure()
-        #plt.imshow(strengths)
-        #for t, f, _ in candidates[:100]:
-            #plt.text(f,t, 'x', ha="center", va="center", color="w")
-        #plt.show()
-#
-
         # Now we'll look at the candidate start positions, strongest
         # first, and see if the LDPC decoder can extract a signal from
         # each of them. This is the second pass in a two-pass scheme:
@@ -319,7 +311,8 @@ class FT8:
         # The call to process1() does most of the remaining work (see
         # below). This loop quits after 10 seconds.
 
-        ## look at candidates, best first.
+        ## look at candidates, best first
+
         decodes = []
         frequencies = {}
         times = {}
@@ -332,13 +325,13 @@ class FT8:
             if start_time < 0 or start_frequency < 0:
                 continue
 
-            #if region in regions.values():
-                #continue
+            if region in regions.values():
+                continue
 
             ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
-            end_time = start_time+(79*npositions)
+            end_time = start_time+(79*nfineblocks)
             end_frequency = start_frequency+(8*nfinebins)
-            signal = m[start_time:end_time:npositions,start_frequency:end_frequency:nfinebins]
+            signal = m[start_time:end_time:nfineblocks,start_frequency:end_frequency:nfinebins]
 
             msg = self.process1(signal)
 
@@ -355,15 +348,14 @@ class FT8:
                     break
 
         print(time.time()-t0)
-        #plt.figure()
-        #plt.imshow(m)
-        #for msg in decodes:
-            #t = times[msg]
-            #f = frequencies[msg]
-            #plt.plot(f,t, 'x')
-            #plt.text(f,t, msg, ha="center", va="top", color="w", rotation=-90)
-        #plt.show()
-
+        plt.figure()
+        plt.imshow(m)
+        for msg in decodes:
+            t = times[msg]
+            f = frequencies[msg]
+            plt.plot(f,t, 'x')
+            plt.text(f,t, msg, ha="center", va="top", color="w", rotation=-90)
+        plt.show()
 
 
     # fsk_bits() is a helper function that turns a 58x8 array of tone
@@ -1050,7 +1042,6 @@ def ldpc_decode(codeword):
     ## 174 codeword bits
     ## 87 parity checks
 
-
     ## Mji
     ## each codeword bit i tells each parity check j
     ## what the bit's log-likelihood of being 0 is
@@ -1102,10 +1093,10 @@ def ldpc_decode(codeword):
             a[a>0.99999] = 0.99
             c = numpy.log((a + 1.0) / (1.0 - a))
             ## have assign be no-op when nmx[a,b] == 0
-            d = numpy.where(numpy.equal(nmx[:,i], 0),
+            e[numpy.arange(0,87), nmx[:,i]-1] = numpy.where(numpy.equal(nmx[:,i], 0),
                             e[numpy.arange(0,87), nmx[:,i]-1],
                             c)
-            e[numpy.arange(0,87), nmx[:,i]-1] = d
+            #e[numpy.arange(0,87), nmx[:,i]-1] = d
 
         ## decide if we are done -- compute the corrected codeword,
         ## see if the parity check succeeds.

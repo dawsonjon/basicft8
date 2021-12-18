@@ -185,7 +185,6 @@ class FT8:
         nfineblocks = 4                       ## Number of starting positions per block
         nfinebins = 2                         ## Number of fine FFT bins per tone
 
-
         nstarts = nblocks * nfineblocks
         start_increment = len(samples) // nstarts
         td = numpy.zeros((nstarts-nfineblocks, self.block*nfinebins))
@@ -239,7 +238,7 @@ class FT8:
         # an FT8 signal for every possible starting position.
 
         # A 2d correlation with the costas array shows where the best matches are
-        maxfbins = m.shape[1] * 3000 * 2 // self.rate
+        maxfbins = m.shape[1] * 3000 * 2 // self.rate #typical SSB receiver has about 2.5KHz bandwidth
         strengths = scipy.signal.correlate2d(m[:,:maxfbins], costas_matrix)[costas_matrix.shape[0]-1:, costas_matrix.shape[1]-1:]
 
         # Overlay the start middle and end of the signal, a real signal will match in all 3
@@ -250,26 +249,24 @@ class FT8:
         end = strengths[(72*nfineblocks):(72*nfineblocks)+start_range, :]
         strengths = start+middle+end
 
-        #estimate the noise floor at each start time
+        # estimate the noise floor at each start time
         noise_floor = numpy.median(strengths, 1)
         threshold = noise_floor*2 #set threshold 6dB above noise floor
 
-        #extract candidate start points from best to worst
+        # Extract candidate start points from best to worst remove any that fall bellow the threshold
+        # we probably won't be able to decode anything below this limit
         sorted_indices = numpy.argsort(strengths, axis=None)[::-1]
         unraveled_indices = numpy.unravel_index(sorted_indices, strengths.shape)
         start_times, start_frequencies = unraveled_indices
-
-        #candidates = list(zip(start_times, start_frequencies, sorted_strengths, start_frequencies//region_size, range(len(start_times))))
-        #find all starting points that exceed the threshold, below this level we probably can't find them anyway
         above_threshold = [(t, f) for t, f in zip(start_times, start_frequencies) if strengths[t, f] > threshold[t]]
 
-        #sort the candidates into frequency regions so we don't waste time repeatedly looking for same signal
-        region_size = nfinebins*8
-        nregions = maxfbins//region_size
-        candidates = [] 
-        for i in range(nregions):
-            in_region = [(t, f) for t, f in above_threshold if f//region_size == i]
-            candidates.append(in_region)
+        # Sort the candidates into frequency slices which are the width of each symbol
+        freqslice_width = nfinebins*8
+        nfreqslices = maxfbins//freqslice_width
+        freqslices = [] 
+        for i in range(nfreqslices):
+            in_region = [(t, f) for t, f in above_threshold if f//freqslice_width == i]
+            freqslices.append(in_region)
 
         # Now we'll look at the candidate start positions, strongest
         # first, and see if the LDPC decoder can extract a signal from
@@ -301,37 +298,46 @@ class FT8:
         decodes = []
         frequencies = {}
         times={}
-        t0 = time.time()
         
-        for rank in range(10):
-            for region in candidates:
-                if rank >= len(region):
+        rank = 0 ## start with highest ranked candidate in each frequency slice
+        while(1): 
+            for freqslice in freqslices:
+
+                if rank >= len(freqslice): ## no more candidates in this slice
                     continue
-                start_time, start_frequency = region[rank]
+
+                candidate = freqslice[rank]
+                start_time, start_frequency = freqslice[rank]
 
                 ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
                 end_time = start_time+(79*nfineblocks)
                 end_frequency = start_frequency+(8*nfinebins)
                 signal = m[start_time:end_time:nfineblocks,start_frequency:end_frequency:nfinebins]
 
+                ## attempt to decode candidate
                 msg = self.process1(signal)
 
                 if msg != None and msg not in decodes:
 
-                    #plt.plot(strengths[start_time, :])
-                    #plt.plot(start_frequency, strengths[start_time, start_frequency], 'x')
-                    #plt.plot(range(strengths.shape[1]), numpy.ones(strengths.shape[1])*threshold[start_time], '-')
-                    #plt.show()
-
-
+                    ## calculate frequency in Hz
                     bin_hz = self.rate / (float(self.block)*nfinebins)
                     hz = start_frequency * bin_hz
+
+                    ## calculate snr from strength 
+                    ## Not sure how accurate this estimate is, but a good comparative value
+                    snr = 20*numpy.log10(strengths[start_time, start_frequency]/noise_floor[start_time])
+                    snr_scale = 10*numpy.log10(bin_hz/(2500)) ## adjust for 2500Hz noise bandwidth
+                    snr += snr_scale
+
                     decodes.append(msg)
                     frequencies[msg] = start_frequency
                     times[msg] = start_time
-                    print("%6.1f %s" % (hz, msg), rank)
+                    print("%6.1f Hz %3.0f dB %s" % (hz, snr, msg), rank)
 
-        print(time.time()-t0)
+            if time.time()-t0 > 10:
+                break
+            rank += 1
+
         plt.figure()
         plt.imshow(m[:, :maxfbins])
         for msg in decodes:

@@ -133,7 +133,11 @@ import time
 import re
 import threading
 
-from matplotlib import pyplot as plt
+#optionaly enable plots
+plot_thresholds = False
+plot_decodes = False
+if plot_thresholds or plot_decodes:
+    from matplotlib import pyplot as plt
 
 ## FT8 modulation and protocol definitions.
 ## 1920-point FFT at 12000 samples/second
@@ -183,7 +187,7 @@ class FT8:
         # try starting at different positions in each blocks, and different
         # frequencies within each tone. 
         nfineblocks = 4                       ## Number of starting positions per block
-        nfinebins = 2                         ## Number of fine FFT bins per tone
+        nfinebins = 4                         ## Number of fine FFT bins per tone
 
         nstarts = nblocks * nfineblocks
         start_increment = len(samples) // nstarts
@@ -239,7 +243,7 @@ class FT8:
 
         # A 2d correlation with the costas array shows where the best matches are
         maxfbins = m.shape[1] * 3000 * 2 // self.rate #typical SSB receiver has about 2.5KHz bandwidth
-        strengths = scipy.signal.correlate2d(m[:,:maxfbins], costas_matrix)[costas_matrix.shape[0]-1:, costas_matrix.shape[1]-1:]
+        strengths = scipy.signal.correlate2d(m[:,:maxfbins], costas_matrix)[costas_matrix.shape[0]-2:, costas_matrix.shape[1]-2:]
 
         # Overlay the start middle and end of the signal, a real signal will match in all 3
         # The signal can only start so late before we won't see the whole thing, limit to this range
@@ -298,6 +302,10 @@ class FT8:
         decodes = []
         frequencies = {}
         times={}
+
+        print("+----------------+----------+--------------------+------+-------------+")
+        print("| Frequency (Hz) | SNR (dB) |       Message      | Rank | Decode Time |")
+        print("+----------------+----------+--------------------+------+-------------+")
         
         rank = 0 ## start with highest ranked candidate in each frequency slice
         while(1): 
@@ -326,26 +334,42 @@ class FT8:
                     ## calculate snr from strength 
                     ## Not sure how accurate this estimate is, but a good comparative value
                     snr = 20*numpy.log10(strengths[start_time, start_frequency]/noise_floor[start_time])
-                    snr_scale = 10*numpy.log10(bin_hz/(2500)) ## adjust for 2500Hz noise bandwidth
+                    snr_scale = 10*numpy.log10(3*bin_hz/(2500)) ## adjust for 2500Hz noise bandwidth
                     snr += snr_scale
 
                     decodes.append(msg)
                     frequencies[msg] = start_frequency
                     times[msg] = start_time
-                    print("%6.1f Hz %3.0f dB %s" % (hz, snr, msg), rank)
+                    print("|{:^16}|{:^10}|{:^20}|{:^6}|{:^13}|".format("%6.1f"%(hz),"%4.1f"%snr, msg, "%2i"%rank, "%2.1f"%(time.time()-t0)))
+
 
             if time.time()-t0 > 10:
                 break
             rank += 1
+        print("+----------------+----------+--------------------+------+-------------+")
 
-        plt.figure()
-        plt.imshow(m[:, :maxfbins])
-        for msg in decodes:
-            t = times[msg]
-            f = frequencies[msg]
-            plt.plot(f,t, 'x')
-            plt.text(f,t, msg, ha="center", va="top", color="w", rotation=-90)
-        plt.show()
+
+        if plot_thresholds:
+            for msg in decodes:
+                t = times[msg]
+                f = frequencies[msg]
+                plt.plot(numpy.arange(strengths.shape[1])*bin_hz, strengths[t, :], '-')
+                plt.plot(numpy.arange(maxfbins)*bin_hz, numpy.ones(maxfbins)*threshold[t], '-')
+                plt.plot(f*bin_hz, strengths[t, f], 'x')
+                plt.title("Thresholds for decode: "+msg)
+                plt.xlabel("Frequency (Hz)")
+                plt.ylabel("Detection Magnitude")
+                plt.show()
+
+        if plot_decodes:
+            plt.figure()
+            plt.imshow(m[:, :maxfbins])
+            for msg in decodes:
+                t = times[msg]
+                f = frequencies[msg]
+                plt.plot(f,t, 'x')
+                plt.text(f,t, msg, ha="center", va="top", color="w", rotation=-90)
+            plt.show()
 
 
     # fsk_bits() is a helper function that turns a 58x8 array of tone
@@ -520,7 +544,7 @@ class FT8:
 
     def readwav(self, chan):
         frames = self.wav.readframes(8192)
-        samples = numpy.fromstring(frames, numpy.int16)
+        samples = numpy.frombuffer(frames, numpy.int16)
         return samples
 
     def gowav(self, filename, chan):

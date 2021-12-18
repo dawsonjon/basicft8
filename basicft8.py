@@ -241,7 +241,7 @@ class FT8:
         # an FT8 signal for every possible starting position.
 
         # A 2d correlation with the costas array shows where the best matches are
-        strengths = scipy.signal.correlate2d(m, costas_matrix)
+        strengths = scipy.signal.correlate2d(m, costas_matrix)[costas_matrix.shape[0]-1:, costas_matrix.shape[1]-1:]
 
         # Overlay the start middle and end of the signal, a real signal will match in all 3
         # The signal can only start so late before we won't see the whole thing, limit to this range
@@ -261,7 +261,8 @@ class FT8:
         start_times, start_frequencies = unraveled_indices
         sorted_strengths = strengths[unraveled_indices]
 
-        candidates = list(zip(start_times-costas_matrix.shape[0]+1, start_frequencies-costas_matrix.shape[1]+1, sorted_strengths, start_frequencies//region_size, range(len(start_times))))
+        #candidates = list(zip(start_times-costas_matrix.shape[0]+1, start_frequencies-costas_matrix.shape[1]+1, sorted_strengths, start_frequencies//region_size, range(len(start_times))))
+        candidates = list(zip(start_times, start_frequencies, sorted_strengths, start_frequencies//region_size, range(len(start_times))))
 
         #we can end up with lots of candidates relating to the same signal, so it would be inefficient to search
         #purely on the basis of power. 

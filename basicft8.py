@@ -182,24 +182,22 @@ class FT8:
         # performance depends on how well the frequency bins and start time align
         # try starting at different positions in each blocks, and different
         # frequencies within each tone. 
-        nfineblocks = 2                       ## Number of starting positions per block
+        nfineblocks = 4                       ## Number of starting positions per block
         nfinebins = 2                         ## Number of fine FFT bins per tone
+
 
         nstarts = nblocks * nfineblocks
         start_increment = len(samples) // nstarts
-
-        m = numpy.zeros((nstarts-nfineblocks, (self.block*nfinebins)//2+1))
+        td = numpy.zeros((nstarts-nfineblocks, self.block*nfinebins))
+        padding = numpy.zeros(self.block*(nfinebins-1))
         for start_position in range(nstarts-nfineblocks):
             block_start = start_position * start_increment
             block_end = block_start + self.block
             block = samples[block_start:block_end]
-            #zero pad to give more than one FFTbin per tone
-            padding = self.block*(nfinebins-1)
-            block = numpy.concatenate((block, numpy.zeros(padding)))
-            bins = numpy.fft.rfft(block)
-            bins = abs(bins)
-            m[start_position] = bins
-
+            block = numpy.concatenate((block, padding))
+            td[start_position] = block
+        noise = numpy.std(td)
+        m = numpy.abs(numpy.fft.rfft(td))
 
         # Much of this code deals with arrays of numbers. Thus block
         # above holds the 1920 samples of a single symbol time, bins
@@ -241,7 +239,8 @@ class FT8:
         # an FT8 signal for every possible starting position.
 
         # A 2d correlation with the costas array shows where the best matches are
-        strengths = scipy.signal.correlate2d(m, costas_matrix)[costas_matrix.shape[0]-1:, costas_matrix.shape[1]-1:]
+        maxfbins = m.shape[1] * 3000 * 2 // self.rate
+        strengths = scipy.signal.correlate2d(m[:,:maxfbins], costas_matrix)[costas_matrix.shape[0]-1:, costas_matrix.shape[1]-1:]
 
         # Overlay the start middle and end of the signal, a real signal will match in all 3
         # The signal can only start so late before we won't see the whole thing, limit to this range
@@ -251,41 +250,26 @@ class FT8:
         end = strengths[(72*nfineblocks):(72*nfineblocks)+start_range, :]
         strengths = start+middle+end
 
-        #extract candidate start points from best to worst
-        nregions = nbins//8
-        frequency_bins = strengths.shape[1] 
-        region_size = frequency_bins/nregions
+        #estimate the noise floor at each start time
+        noise_floor = numpy.median(strengths, 1)
+        threshold = noise_floor*2 #set threshold 6dB above noise floor
 
+        #extract candidate start points from best to worst
         sorted_indices = numpy.argsort(strengths, axis=None)[::-1]
         unraveled_indices = numpy.unravel_index(sorted_indices, strengths.shape)
         start_times, start_frequencies = unraveled_indices
-        sorted_strengths = strengths[unraveled_indices]
 
-        #candidates = list(zip(start_times-costas_matrix.shape[0]+1, start_frequencies-costas_matrix.shape[1]+1, sorted_strengths, start_frequencies//region_size, range(len(start_times))))
-        candidates = list(zip(start_times, start_frequencies, sorted_strengths, start_frequencies//region_size, range(len(start_times))))
+        #candidates = list(zip(start_times, start_frequencies, sorted_strengths, start_frequencies//region_size, range(len(start_times))))
+        #find all starting points that exceed the threshold, below this level we probably can't find them anyway
+        above_threshold = [(t, f) for t, f in zip(start_times, start_frequencies) if strengths[t, f] > threshold[t]]
 
-        #we can end up with lots of candidates relating to the same signal, so it would be inefficient to search
-        #purely on the basis of power. 
-        deinterleaved_candidates = {}
+        #sort the candidates into frequency regions so we don't waste time repeatedly looking for same signal
+        region_size = nfinebins*8
+        nregions = maxfbins//region_size
+        candidates = [] 
         for i in range(nregions):
-            deinterleaved_candidates[i] = []
-        for candidate in candidates[:len(candidates)//2]:
-            t, f, s, region, _ = candidate
-            if f < 0 or t < 0: 
-                continue
-            deinterleaved_candidates[region].append(candidate)
-
-        iterators = [iter(i) for i in deinterleaved_candidates.values()]
-
-        candidates = []
-        for i in range(10000):
-            for i in iterators:
-                try:
-                    x = next(i)
-                    candidates.append(x)
-                except StopIteration:
-                    pass
-        
+            in_region = [(t, f) for t, f in above_threshold if f//region_size == i]
+            candidates.append(in_region)
 
         # Now we'll look at the candidate start positions, strongest
         # first, and see if the LDPC decoder can extract a signal from
@@ -316,41 +300,40 @@ class FT8:
 
         decodes = []
         frequencies = {}
-        times = {}
-        regions = {}
+        times={}
         t0 = time.time()
-        rank = 0
-        for start_time, start_frequency, strength, region, global_rank in candidates:
-            rank += 1
+        
+        for rank in range(10):
+            for region in candidates:
+                if rank >= len(region):
+                    continue
+                start_time, start_frequency = region[rank]
 
-            if start_time < 0 or start_frequency < 0:
-                continue
+                ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
+                end_time = start_time+(79*nfineblocks)
+                end_frequency = start_frequency+(8*nfinebins)
+                signal = m[start_time:end_time:nfineblocks,start_frequency:end_frequency:nfinebins]
 
-            if region in regions.values():
-                continue
+                msg = self.process1(signal)
 
-            ## a signal's worth of FFT bins -- 79 symbols, 8 FSK tones.
-            end_time = start_time+(79*nfineblocks)
-            end_frequency = start_frequency+(8*nfinebins)
-            signal = m[start_time:end_time:nfineblocks,start_frequency:end_frequency:nfinebins]
+                if msg != None and msg not in decodes:
 
-            msg = self.process1(signal)
+                    #plt.plot(strengths[start_time, :])
+                    #plt.plot(start_frequency, strengths[start_time, start_frequency], 'x')
+                    #plt.plot(range(strengths.shape[1]), numpy.ones(strengths.shape[1])*threshold[start_time], '-')
+                    #plt.show()
 
-            if msg != None and msg not in decodes:
-                bin_hz = self.rate / (float(self.block)*nfinebins)
-                hz = start_frequency * bin_hz
-                decodes.append(msg)
-                frequencies[msg] = start_frequency
-                times[msg] = start_time
-                regions[msg] = region
-                print("%6.1f %s" % (hz, msg), region, rank, global_rank)
 
-            if len(decodes) == 8:
-                    break
+                    bin_hz = self.rate / (float(self.block)*nfinebins)
+                    hz = start_frequency * bin_hz
+                    decodes.append(msg)
+                    frequencies[msg] = start_frequency
+                    times[msg] = start_time
+                    print("%6.1f %s" % (hz, msg), rank)
 
         print(time.time()-t0)
         plt.figure()
-        plt.imshow(m)
+        plt.imshow(m[:, :maxfbins])
         for msg in decodes:
             t = times[msg]
             f = frequencies[msg]
